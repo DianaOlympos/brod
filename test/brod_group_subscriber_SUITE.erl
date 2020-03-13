@@ -47,6 +47,7 @@
         , t_async_commit/1
         , t_consumer_crash/1
         , t_assign_partitions_handles_updating_state/1
+        , t_subscribe_same_partition/1
         ]).
 
 
@@ -85,6 +86,7 @@ groups() ->
                                , t_2_members_one_partition
                                , t_async_commit
                                , t_assign_partitions_handles_updating_state
+                               , t_subscribe_same_partition
                                ]}
   ].
 
@@ -106,6 +108,7 @@ common_init_per_testcase(Case, Config) ->
   ok = brod:start_producer(ClientId, ?TOPIC2, _ProducerConfig = []),
   ok = brod:start_producer(ClientId, ?TOPIC3, _ProducerConfig = []),
   ok = brod:start_producer(ClientId, ?TOPIC4, _ProducerConfig = []),
+  ok = brod:start_producer(ClientId, ?TOPIC5, _ProducerConfig = []),
   Config.
 
 common_end_per_testcase(Case, Config) when is_list(Config) ->
@@ -123,18 +126,20 @@ common_end_per_testcase(Case, Config) when is_list(Config) ->
 
 %%%_* Group subscriber callbacks ===============================================
 
-init(_GroupId, Config) ->
+init(GroupId, Config) ->
   IsAsyncAck         = maps:get(async_ack, Config, false),
   IsAsyncCommit      = maps:get(async_commit, Config, false),
   IsAssignPartitions = maps:get(assign_partitions, Config, false),
   {ok, #state{ is_async_ack         = IsAsyncAck
              , is_async_commit      = IsAsyncCommit
              , is_assign_partitions = IsAssignPartitions
+             , group_id             = GroupId
              }}.
 
 handle_message(Topic, Partition, Message,
                #state{ is_async_ack    = IsAsyncAck
                      , is_async_commit = IsAsyncCommit
+                     , group_id        = GroupId
                      } = State) ->
   #kafka_message{ offset = Offset
                 , value  = Value
@@ -145,6 +150,7 @@ handle_message(Topic, Partition, Message,
        , offset    => Offset
        , value     => Value
        , worker    => self()
+       , group_id  => GroupId
        }),
   case {IsAsyncAck, IsAsyncCommit} of
     {true,  _}     -> {ok, State};
@@ -394,6 +400,43 @@ t_2_members_one_partition(Config) when is_list(Config) ->
          ?assertMatch( [_]
                      , lists:usort(PidsOfWorkers)
                      )
+     end).
+
+%% Check that two group subscrivers can consume from the same
+%% topic-partition.
+t_subscribe_same_partition(Config) when is_list(Config) ->
+  Topic = ?TOPIC5,
+  Group1 = <<"subscribe_same_partition_grp1">>,
+  Group2 = <<"subscribe_same_partition_grp2">>,
+  MaxSeqNo = 100,
+  InitArgs = #{},
+  L = payloads(Config),
+  SendFun =
+    fun(Value) ->
+      ok = brod:produce_sync(?CLIENT_ID, Topic, 0, <<>>, Value)
+    end,
+  ?check_trace(
+     #{ timeout => 5000 },
+     %% Run stage:
+     begin
+       %% Start two subscribers consuming from the same partition:
+       {ok, _, _} = start_subscriber( [{group_id, Group1} | Config]
+                                    , [Topic]
+                                    , InitArgs
+                                    ),
+       {ok, _, _} = start_subscriber( [{group_id, Group2} | Config]
+                                    , [Topic]
+                                    , InitArgs
+                                    ),
+       %% Send messages:
+       timer:sleep(20000),
+       lists:foreach(SendFun, L)
+     end,
+     fun(_, Trace) ->
+         TraceSub1 = [Msg || Msg = #{group_id := GID} <- Trace, GID == Group1],
+         TraceSub2 = [Msg || Msg = #{group_id := GID} <- Trace, GID == Group2],
+         check_all_messages_were_received_once(TraceSub1, L),
+         check_all_messages_were_received_once(TraceSub2, L)
      end).
 
 t_async_commit({init, Config}) ->
