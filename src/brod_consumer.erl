@@ -90,6 +90,7 @@
                , size_stat_window    :: non_neg_integer()
                , prefetch_bytes      :: non_neg_integer()
                , connection_mref     :: ?undef | reference()
+               , owner_tag           :: brod:owner_tag()
                }).
 
 -type state() :: #state{}.
@@ -118,6 +119,12 @@
         {ok, pid()} | {error, any()}.
 start_link(Bootstrap, Topic, Partition, Config) ->
   start_link(Bootstrap, Topic, Partition, Config, []).
+
+-spec start_link(pid() | brod:bootstrap(),
+                 topic(), partition(), config(), [any()]) ->
+                    {ok, pid()} | {error, any()}.
+start_link(Bootstrap, Topic, Partition, Config, Debug) ->
+  start_link(Bootstrap, default, Topic, Partition, Config, Debug).
 
 %% @doc Start (link) a partition consumer.
 %%
@@ -186,10 +193,10 @@ start_link(Bootstrap, Topic, Partition, Config) ->
 %% </ul>
 %% @end
 -spec start_link(pid() | brod:bootstrap(),
-                 topic(), partition(), config(), [any()]) ->
+                 brod:owner_tag(), topic(), partition(), config(), [any()]) ->
                     {ok, pid()} | {error, any()}.
-start_link(Bootstrap, Topic, Partition, Config, Debug) ->
-  Args = {Bootstrap, Topic, Partition, Config},
+start_link(Bootstrap, OwnerTag, Topic, Partition, Config, Debug) ->
+  Args = {Bootstrap, OwnerTag, Topic, Partition, Config},
   gen_server:start_link(?MODULE, Args, [{debug, Debug}]).
 
 -spec stop(pid()) -> ok | {error, any()}.
@@ -258,7 +265,7 @@ get_connection(Pid) ->
 
 %%%_* gen_server callbacks =====================================================
 
-init({Bootstrap, Topic, Partition, Config}) ->
+init({Bootstrap, Tag, Topic, Partition, Config}) ->
   erlang:process_flag(trap_exit, true),
   Cfg = fun(Name, Default) ->
           proplists:get_value(Name, Config, Default)
@@ -274,7 +281,7 @@ init({Bootstrap, Topic, Partition, Config}) ->
   %% If bootstrap is a client pid, register self to the client
   case is_shared_conn(Bootstrap) of
     true ->
-      ok = brod_client:register_consumer(Bootstrap, Topic, Partition);
+      ok = brod_client:register_consumer(Bootstrap, Tag, Topic, Partition);
     false ->
       ok
   end,
@@ -296,6 +303,7 @@ init({Bootstrap, Topic, Partition, Config}) ->
              , max_bytes           = MaxBytes
              , size_stat_window    = Cfg(size_stat_window, ?DEFAULT_AVG_WINDOW)
              , connection_mref     = ?undef
+             , owner_tag           = Tag
              }}.
 
 %% @private
@@ -391,20 +399,21 @@ terminate(Reason, #state{ bootstrap = Bootstrap
                         , topic = Topic
                         , partition = Partition
                         , connection = Connection
+                        , owner_tag = Tag
                         }) ->
   IsShared = is_shared_conn(Bootstrap),
   IsNormal = brod_utils:is_normal_reason(Reason),
   %% deregister consumer if it's shared connection and normal shutdown
   IsShared andalso IsNormal andalso
-    brod_client:deregister_consumer(Bootstrap, Topic, Partition),
+    brod_client:deregister_consumer(Bootstrap, Tag, Topic, Partition),
   %% close connection if it's working standalone
   case not IsShared andalso is_pid(Connection) of
     true -> kpro:close_connection(Connection);
     false -> ok
   end,
   %% write a log if it's not a normal reason
-  IsNormal orelse error_logger:error_msg("Consumer ~s-~w terminate reason: ~p",
-                                         [Topic, Partition, Reason]),
+  IsNormal orelse error_logger:error_msg("Consumer ~p ~s-~w terminate reason: ~p",
+                                         [Tag, Topic, Partition, Reason]),
   ok.
 
 %% @private

@@ -151,6 +151,7 @@
              , message_set/0
              , offset/0
              , offset_time/0
+             , owner_tag/0
              , partition/0
              , partition_assignment/0
              , partition_fun/0
@@ -259,6 +260,8 @@
 -type fold_result() :: ?BROD_FOLD_RET(fold_acc(),
                                       OffsetToContinue :: offset(),
                                       fold_stop_reason()).
+
+-type owner_tag() :: term().
 
 %%%_* APIs =====================================================================
 
@@ -662,10 +665,10 @@ sync_produce_request_offset(CallRef, Timeout) ->
 %%
 %% In case `#kafka_fetch_error{}' is received the subscriber should
 %% re-subscribe itself to resume the data stream.
--spec subscribe(client(), pid(), topic(), partition(),
+-spec subscribe(client(), pid(), owner_tag(), topic(), partition(),
                 consumer_options()) -> {ok, pid()} | {error, any()}.
-subscribe(Client, SubscriberPid, Topic, Partition, Options) ->
-  case brod_client:get_consumer(Client, Topic, Partition) of
+subscribe(Client, SubscriberPid, Tag, Topic, Partition, Options) ->
+  case brod_client:get_consumer(Client, Tag, Topic, Partition) of
     {ok, ConsumerPid} ->
       case subscribe(ConsumerPid, SubscriberPid, Options) of
         ok    -> {ok, ConsumerPid};
@@ -674,6 +677,11 @@ subscribe(Client, SubscriberPid, Topic, Partition, Options) ->
     {error, Reason} ->
       {error, Reason}
   end.
+
+-spec subscribe(client(), pid(), topic(), partition(),
+                consumer_options()) -> {ok, pid()} | {error, any()}.
+subscribe(Client, SubscriberPid, Topic, Partition, Options) ->
+  subscribe(Client, SubscriberPid, default, Topic, Partition, Options).
 
 -spec subscribe(pid(), pid(), consumer_options()) -> ok | {error, any()}.
 subscribe(ConsumerPid, SubscriberPid, Options) ->
@@ -704,13 +712,18 @@ unsubscribe(ConsumerPid) ->
 unsubscribe(ConsumerPid, SubscriberPid) ->
   brod_consumer:unsubscribe(ConsumerPid, SubscriberPid).
 
--spec consume_ack(client(), topic(), partition(), offset()) ->
+-spec consume_ack(client(), owner_tag(), topic(), partition(), offset()) ->
         ok | {error, any()}.
-consume_ack(Client, Topic, Partition, Offset) ->
-  case brod_client:get_consumer(Client, Topic, Partition) of
+consume_ack(Client, Tag, Topic, Partition, Offset) ->
+  case brod_client:get_consumer(Client, Tag, Topic, Partition) of
     {ok, ConsumerPid} -> consume_ack(ConsumerPid, Offset);
     {error, Reason}   -> {error, Reason}
   end.
+
+-spec consume_ack(client(), topic(), partition(), offset()) ->
+        ok | {error, any()}.
+consume_ack(Client, Topic, Partition, Offset) ->
+  consume_ack(Client, default, Topic, Partition, Offset).
 
 -spec consume_ack(pid(), offset()) -> ok | {error, any()}.
 consume_ack(ConsumerPid, Offset) ->

@@ -17,16 +17,17 @@
 -module(brod_client).
 -behaviour(gen_server).
 
--export([ get_consumer/3
+-export([ get_consumer/4
+        , get_consumer/3
         , get_connection/3
         , get_group_coordinator/2
         , get_leader_connection/3
         , get_metadata/2
         , get_partitions_count/2
         , get_producer/3
-        , register_consumer/3
+        , register_consumer/4
         , register_producer/3
-        , deregister_consumer/3
+        , deregister_consumer/4
         , deregister_producer/3
         , start_link/3
         , start_producer/3
@@ -38,7 +39,7 @@
 
 %% Private export
 -export([ find_producer/3
-        , find_consumer/3
+        , find_consumer/4
         ]).
 
 -export([ code_change/3
@@ -60,14 +61,14 @@
 -define(ETS(ClientId), ClientId).
 -define(PRODUCER_KEY(Topic, Partition),
         {producer, Topic, Partition}).
--define(CONSUMER_KEY(Topic, Partition),
-        {consumer, Topic, Partition}).
+-define(CONSUMER_KEY(Tag, Topic, Partition),
+        {consumer, Tag, Topic, Partition}).
 -define(TOPIC_METADATA_KEY(Topic),
         {topic_metadata, Topic}).
 -define(PRODUCER(Topic, Partition, Pid),
         {?PRODUCER_KEY(Topic, Partition), Pid}).
--define(CONSUMER(Topic, Partition, Pid),
-        {?CONSUMER_KEY(Topic, Partition), Pid}).
+-define(CONSUMER(Tag, Topic, Partition, Pid),
+        {?CONSUMER_KEY(Tag, Topic, Partition), Pid}).
 
 -define(UNKNOWN_TOPIC_CACHE_EXPIRE_SECONDS, 120).
 
@@ -78,9 +79,10 @@
 -type partition() :: brod:partition().
 -type config() :: proplists:proplist().
 -type group_id() :: brod:group_id().
+-type owner_tag() :: brod:owner_tag().
 
 -type partition_worker_key() :: ?PRODUCER_KEY(topic(), partition())
-                              | ?CONSUMER_KEY(topic(), partition()).
+                              | ?CONSUMER_KEY(owner_tag(), topic(), partition()).
 
 -type get_producer_error() :: client_down
                             | {producer_down, noproc}
@@ -152,11 +154,17 @@ get_producer(Client, Topic, Partition) ->
       Error
   end.
 
-%% @doc Get consumer of the given topic-parition.
+%% @doc Get consumer of the given tag-topic-parition.
+-spec get_consumer(client(), owner_tag(), topic(), partition()) ->
+        {ok, pid()} | {error, get_consumer_error()}.
+get_consumer(Client, Tag, Topic, Partition) ->
+  get_partition_worker(Client, ?CONSUMER_KEY(Tag, Topic, Partition)).
+
+%% @doc Get consumer of the given topic-parition and default tag.
 -spec get_consumer(client(), topic(), partition()) ->
         {ok, pid()} | {error, get_consumer_error()}.
 get_consumer(Client, Topic, Partition) ->
-  get_partition_worker(Client, ?CONSUMER_KEY(Topic, Partition)).
+  get_consumer(Client, default, Topic, Partition).
 
 %% @doc Dynamically start a per-topic producer.
 %% Return ok if the producer is already started.
@@ -266,18 +274,18 @@ deregister_producer(Client, Topic, Partition) ->
 %% @doc Register self() as a partition consumer. The pid is registered in an ETS
 %% table, then the callers may lookup a consumer pid from the table ane make
 %% subscribe calls to the process directly.
--spec register_consumer(client(), topic(), partition()) -> ok.
-register_consumer(Client, Topic, Partition) ->
+-spec register_consumer(client(), owner_tag(), topic(), partition()) -> ok.
+register_consumer(Client, Tag, Topic, Partition) ->
   Consumer = self(),
-  Key = ?CONSUMER_KEY(Topic, Partition),
+  Key = ?CONSUMER_KEY(Tag, Topic, Partition),
   gen_server:cast(Client, {register, Key, Consumer}).
 
 %% @doc De-register the consumer for a partition. The partition consumer
 %% entry is deleted from the ETS table to allow cleanup of purposefully
 %% stopped consumers and allow later restart.
--spec deregister_consumer(client(), topic(), partition()) -> ok.
-deregister_consumer(Client, Topic, Partition) ->
-  Key = ?CONSUMER_KEY(Topic, Partition),
+-spec deregister_consumer(client(), owner_tag(), topic(), partition()) -> ok.
+deregister_consumer(Client, Tag, Topic, Partition) ->
+  Key = ?CONSUMER_KEY(Tag, Topic, Partition),
   gen_server:cast(Client, {deregister, Key}).
 
 %%%_* gen_server callbacks =====================================================
@@ -447,7 +455,7 @@ lookup_partition_worker(Client, Ets, Key) ->
       find_partition_worker(Client, Key);
     [?PRODUCER(_Topic, _Partition, Pid)] ->
       {ok, Pid};
-    [?CONSUMER(_Topic, _Partition, Pid)] ->
+    [?CONSUMER(_Tag, _Topic, _Partition, Pid)] ->
       {ok, Pid}
   catch
     error : badarg ->
@@ -458,9 +466,10 @@ lookup_partition_worker(Client, Ets, Key) ->
         {ok, pid()} | {error, get_worker_error()}.
 find_partition_worker(Client, ?PRODUCER_KEY(Topic, Partition)) ->
   find_producer(Client, Topic, Partition);
-find_partition_worker(Client, ?CONSUMER_KEY(Topic, Partition)) ->
-  find_consumer(Client, Topic, Partition).
+find_partition_worker(Client, ?CONSUMER_KEY(Tag, Topic, Partition)) ->
+  find_consumer(Client, Tag, Topic, Partition).
 
+%% @private
 -spec find_producer(client(), topic(), partition()) ->
         {ok, pid()} | {error, get_producer_error()}.
 find_producer(Client, Topic, Partition) ->
@@ -471,12 +480,13 @@ find_producer(Client, Topic, Partition) ->
       {error, Reason}
   end.
 
--spec find_consumer(client(), topic(), partition()) ->
+%% @private
+-spec find_consumer(client(), owner_tag(), topic(), partition()) ->
         {ok, pid()} | {error, get_consumer_error()}.
-find_consumer(Client, Topic, Partition) ->
+find_consumer(Client, Tag, Topic, Partition) ->
   case safe_gen_call(Client, get_consumers_sup_pid, infinity) of
     {ok, SupPid} ->
-      brod_consumers_sup:find_consumer(SupPid, Topic, Partition);
+      brod_consumers_sup:find_consumer(SupPid, Tag, Topic, Partition);
     {error, Reason} ->
       {error, Reason}
   end.

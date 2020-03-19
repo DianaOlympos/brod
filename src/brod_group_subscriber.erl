@@ -578,12 +578,13 @@ do_commit_ack(Pid, GenerationId, Topic, Partition, Offset) ->
 
 subscribe_partitions(#state{ client    = Client
                            , consumers = Consumers0
+                           , groupId   = GroupId
                            } = State) ->
   Consumers =
-    lists:map(fun(C) -> subscribe_partition(Client, C) end, Consumers0),
+    lists:map(fun(C) -> subscribe_partition(Client, GroupId, C) end, Consumers0),
   {ok, State#state{consumers = Consumers}}.
 
-subscribe_partition(Client, Consumer) ->
+subscribe_partition(Client, GroupId, Consumer) ->
   #consumer{ topic_partition = {Topic, Partition}
            , consumer_pid    = Pid
            , begin_offset    = BeginOffset0
@@ -611,13 +612,18 @@ subscribe_partition(Client, Consumer) ->
           true  -> []; %% fetch from 'begin_offset' in consumer config
           false -> [{begin_offset, BeginOffset}]
         end,
-      case brod:subscribe(Client, self(), Topic, Partition, Options) of
+      case brod:subscribe(Client, self(), GroupId, Topic, Partition, Options) of
         {ok, ConsumerPid} ->
           Mref = erlang:monitor(process, ConsumerPid),
           Consumer#consumer{ consumer_pid  = ConsumerPid
                            , consumer_mref = Mref
                            };
         {error, Reason} ->
+          erlang:display({failed2sub, #{ reason => Reason
+                                       , client => Client
+                                       , self => self()
+                                       , options => Options
+                                       }}),
           Consumer#consumer{ consumer_pid  = ?DOWN(Reason)
                            , consumer_mref = ?undef
                            }
